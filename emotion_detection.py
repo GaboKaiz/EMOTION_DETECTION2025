@@ -1,34 +1,21 @@
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
-from deepface import DeepFace
 
-# Clase para detección de emociones con deepface
-class EmotionDetector:
-    def __init__(self):
-        self.emotion_labels = ['angry', 'disgust', 'fear', 'happy', 'sad', 'surprise', 'neutral']
+# Cargar el clasificador Haar Cascade para detección de rostros
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+if face_cascade.empty():
+    print("Error: No se pudo cargar el clasificador Haar Cascade")
+    exit()
 
-    def detect_emotions(self, frame):
-        try:
-            # Analizar el frame con deepface
-            result = DeepFace.analyze(frame, actions=['emotion'], enforce_detection=False, silent=True)
-            if isinstance(result, list):
-                return [self.format_emotion(r) for r in result]
-            return [self.format_emotion(result)]
-        except Exception as e:
-            print(f"Error en detección: {e}")
-            return []
+# Cargar el clasificador para detectar sonrisas (incluido en OpenCV)
+smile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_smile.xml')
+if smile_cascade.empty():
+    print("Error: No se pudo cargar el clasificador de sonrisas")
+    exit()
 
-    def format_emotion(self, result):
-        x, y, w, h = result.get('region', {'x': 0, 'y': 0, 'w': 0, 'h': 0})
-        emotions = result.get('emotion', {})
-        return {
-            'box': [x, y, w, h],
-            'emotions': {label: float(emotions.get(label, 0)) for label in self.emotion_labels}
-        }
-
-# Inicializar el detector de emociones
-detector = EmotionDetector()
+# Etiquetas de emociones (simplificadas para heurísticas)
+emotion_labels = ['neutral', 'happy', 'sad']
 
 # Inicializar la captura de video desde la webcam
 cap = cv2.VideoCapture(0)
@@ -37,7 +24,7 @@ if not cap.isOpened():
     exit()
 
 # Diccionario para contar la frecuencia de emociones
-emotion_counts = {'angry': 0, 'disgust': 0, 'fear': 0, 'happy': 0, 'sad': 0, 'surprise': 0, 'neutral': 0}
+emotion_counts = {label: 0 for label in emotion_labels}
 
 # Configurar la figura para el gráfico en tiempo real
 plt.ion()
@@ -50,35 +37,74 @@ ax.set_title("Frecuencia de Emociones Detectadas")
 ax.set_ylabel("Frecuencia")
 plt.xticks(rotation=45)
 
+def estimate_emotion(face_img, gray_face, x, y, w, h):
+    """Estima la emoción basada en la detección de sonrisa y tamaño de la boca."""
+    # Detectar sonrisas en la región del rostro
+    smiles = smile_cascade.detectMultiScale(gray_face, scaleFactor=1.7, minNeighbors=20, minSize=(20, 20))
+    
+    if len(smiles) > 0:
+        # Si se detecta una sonrisa, clasificar como "happy"
+        return "happy", 0.8
+    else:
+        # Si no hay sonrisa, analizar la forma de la boca usando contornos
+        # Extraer la región inferior del rostro (donde está la boca)
+        mouth_region = gray_face[int(h*0.6):h, x:x+w]
+        if mouth_region.size == 0:
+            return "neutral", 0.5
+        
+        # Aplicar umbral para detectar bordes de la boca
+        _, thresh = cv2.threshold(mouth_region, 100, 255, cv2.THRESH_BINARY_INV)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if contours:
+            # Obtener el contorno más grande (probablemente la boca)
+            max_contour = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(max_contour) > 50:  # Filtrar contornos pequeños
+                x_m, y_m, w_m, h_m = cv2.boundingRect(max_contour)
+                # Si la boca es ancha y curvada hacia abajo, asumir "sad"
+                if h_m / w_m < 0.5:
+                    return "sad", 0.7
+        return "neutral", 0.5
+
 while True:
     ret, frame = cap.read()
     if not ret:
         print("Error: No se pudo capturar el frame")
         break
 
-    # Detectar emociones
-    results = detector.detect_emotions(frame)
+    # Convertir a escala de grises para detección de rostros
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    for face in results:
-        emotions_detected = face['emotions']
-        dominant_emotion = max(emotions_detected, key=emotions_detected.get)
-        score = emotions_detected[dominant_emotion]
+    # Detectar rostros
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
-        # Dibujar rectángulo y etiqueta
-        box = face['box']
-        x, y, w, h = box
-        if w > 0 and h > 0:  # Verificar que el cuadro sea válido
+    for (x, y, w, h) in faces:
+        # Extraer la región del rostro
+        face_img = frame[y:y+h, x:x+w]
+        gray_face = gray[y:y+h, x:x+w]
+        if face_img.size == 0:
+            continue
+
+        try:
+            # Estimar la emoción usando heurísticas
+            dominant_emotion, score = estimate_emotion(face_img, gray_face, x, y, w, h)
+
+            # Dibujar rectángulo y etiqueta
             cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
             cv2.putText(frame, f"{dominant_emotion}: {score:.2f}", (x, y - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
-        emotion_counts[dominant_emotion] += 1
+            # Actualizar conteo de emociones
+            emotion_counts[dominant_emotion] += 1
+        except Exception as e:
+            print(f"Error al procesar la emoción: {e}")
+            continue
 
     # Actualizar el gráfico de barras
     counts = [emotion_counts[emotion] for emotion in emotions]
     for bar, count in zip(bars, counts):
         bar.set_height(count)
-    ax.set_ylim(0, max(max(counts) + 10, 100))
+    ax.set_ylim(0, max(max(counts, default=0) + 10, 100))
     plt.draw()
     plt.pause(0.01)
 
