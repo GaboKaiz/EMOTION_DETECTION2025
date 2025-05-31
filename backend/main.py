@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
 from dotenv import load_dotenv
@@ -10,6 +10,7 @@ from emotion_detection import EmotionDetector
 import json
 from datetime import datetime
 import logging
+import time
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -60,6 +61,12 @@ def convert_to_serializable(obj):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     logger.info("Conexión WebSocket aceptada")
+    
+    # Lista para almacenar resultados temporalmente
+    emotion_buffer = []
+    last_save_time = time.time()
+    save_interval = 10  # Guardar cada 10 segundos
+
     try:
         while True:
             data = await websocket.receive_text()
@@ -93,10 +100,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 for result in results
             ]
 
-            # Guardar en MongoDB
+            # Agregar resultados al buffer
             if results:
-                for result in results:
-                    try:
+                emotion_buffer.extend(results)
+
+            # Enviar resultados al frontend en tiempo real
+            await websocket.send_json(results)
+
+            # Guardar en MongoDB cada 10 segundos
+            current_time = time.time()
+            if current_time - last_save_time >= save_interval and emotion_buffer:
+                try:
+                    for result in emotion_buffer:
                         collection.insert_one({
                             "emotion": result["emotion"],
                             "score": result["score"],
@@ -104,14 +119,30 @@ async def websocket_endpoint(websocket: WebSocket):
                             "timestamp": datetime.utcnow().isoformat()
                         })
                         logger.info(f"Emoción guardada: {result['emotion']}")
-                    except Exception as e:
-                        logger.error(f"Error al guardar en MongoDB: {e}")
+                    emotion_buffer.clear()  # Limpiar el buffer después de guardar
+                    last_save_time = current_time
+                    logger.info(f"Guardado en MongoDB completado. Próximo guardado en {save_interval} segundos")
+                except Exception as e:
+                    logger.error(f"Error al guardar en MongoDB: {e}")
 
-            # Enviar resultados al frontend
-            await websocket.send_json(results)
+    except WebSocketDisconnect:
+        logger.info("Cliente desconectado del WebSocket")
     except Exception as e:
         logger.error(f"Error en WebSocket: {e}")
     finally:
+        # Guardar cualquier dato restante antes de cerrar
+        if emotion_buffer:
+            try:
+                for result in emotion_buffer:
+                    collection.insert_one({
+                        "emotion": result["emotion"],
+                        "score": result["score"],
+                        "box": result["box"],
+                        "timestamp": datetime.utcnow().isoformat()
+                    })
+                    logger.info(f"Emoción guardada al cerrar: {result['emotion']}")
+            except Exception as e:
+                logger.error(f"Error al guardar datos finales en MongoDB: {e}")
         logger.info("Conexión WebSocket cerrada")
         await websocket.close()
 

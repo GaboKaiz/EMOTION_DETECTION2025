@@ -5,17 +5,23 @@ const EmotionDetector = ({ onEmotionDetected }) => {
     const canvasRef = useRef(null);
     const wsRef = useRef(null);
     const [error, setError] = useState(null);
+    const lastFrameTime = useRef(0);
+    const frameInterval = 100; // Enviar frames cada 100ms (10 fps)
+    const isMounted = useRef(true);
 
     useEffect(() => {
+        isMounted.current = true;
+
         navigator.mediaDevices
             .getUserMedia({ video: true })
             .then((stream) => {
-                videoRef.current.srcObject = stream;
-                console.log("Webcam accedida correctamente");
-                // Esperar a que el video tenga metadatos cargados
-                videoRef.current.onloadedmetadata = () => {
-                    console.log("Metadatos del video cargados");
-                };
+                if (videoRef.current) {
+                    videoRef.current.srcObject = stream;
+                    console.log("Webcam accedida correctamente");
+                    videoRef.current.onloadedmetadata = () => {
+                        console.log("Metadatos del video cargados");
+                    };
+                }
             })
             .catch((err) => {
                 setError("Error al acceder a la webcam: " + err.message);
@@ -29,6 +35,7 @@ const EmotionDetector = ({ onEmotionDetected }) => {
             console.log("WebSocket conectado");
         };
         wsRef.current.onmessage = (event) => {
+            if (!isMounted.current) return;
             const results = JSON.parse(event.data);
             console.log("Resultados recibidos:", results);
             const ctx = canvasRef.current.getContext("2d");
@@ -61,15 +68,28 @@ const EmotionDetector = ({ onEmotionDetected }) => {
         };
 
         return () => {
-            if (wsRef.current) wsRef.current.close();
+            isMounted.current = false;
+            if (wsRef.current) {
+                wsRef.current.close();
+                console.log("WebSocket cerrado al desmontar componente");
+            }
             if (videoRef.current && videoRef.current.srcObject) {
                 videoRef.current.srcObject.getTracks().forEach((track) => track.stop());
+                console.log("Webcam detenida");
             }
         };
     }, [onEmotionDetected]);
 
     useEffect(() => {
         const sendFrame = () => {
+            if (!isMounted.current) return;
+
+            const now = Date.now();
+            if (now - lastFrameTime.current < frameInterval) {
+                requestAnimationFrame(sendFrame);
+                return;
+            }
+
             if (
                 videoRef.current &&
                 canvasRef.current &&
@@ -81,10 +101,10 @@ const EmotionDetector = ({ onEmotionDetected }) => {
                 const ctx = canvasRef.current.getContext("2d");
                 ctx.drawImage(videoRef.current, 0, 0);
                 const dataUrl = canvasRef.current.toDataURL("image/jpeg", 0.7);
-                // Verificar que dataUrl tenga datos válidos
-                if (dataUrl.length > 100) { // Un dataURL válido debería ser mucho más largo que 100 caracteres
+                if (dataUrl.length > 100) {
                     wsRef.current.send(dataUrl);
                     console.log("Frame válido enviado al WebSocket");
+                    lastFrameTime.current = now;
                 } else {
                     console.log("Frame inválido, no enviado");
                 }
