@@ -1,0 +1,4 @@
+en cmd como administrador corremos con:
+net start MongoDB
+en cmd para ocnectayr mongo db compass:
+"C:\Program Files\MongoDB\Server\8.0\bin\mongod.exe"
